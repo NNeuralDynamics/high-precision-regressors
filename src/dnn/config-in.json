@@ -1,11 +1,13 @@
 {
-    "model_type": "dnn",
-    "input_shape": 4,
+    "model_type": "skip",
+    "input_shape": 8,
     "var_y": "yN",
-    "depth": 8,
-    "width": 72,
-    "data_path": "/home/apaul/Codes/high-precision-ml/data/",
+    "depth": 9,
+    "width": 50,
+    "data_path": "/home/apaul/beegfs/high-precision-regressors/data/",
+    "folded": false,
     "scaled": "normal",
+    "activation": "leaky_relu",
     "lr_decay_type": "exp",
     "initial_lr": 0.001,
     "final_lr": 1e-06,
@@ -21,7 +23,7 @@
         "mae"
     ],
     "verbose": 0,
-    "base_directory": "",
+    "base_directory": "RUNS-sample-size-II/",
     "epochs": 10000,
     "sample-size": 10000000,
     "model-uuid": "UUID"

@@ -4,19 +4,14 @@
 
 import pandas as pd
 import numpy as np
-import time
 import tensorflow as tf
-from keras.callbacks import ModelCheckpoint
 import matplotlib.pyplot as plt
-from scipy.signal import argrelextrema
-import scipy.interpolate as interpolate
-from tensorflow.keras.callbacks import Callback
 from pyspark.sql import SparkSession
 from pyspark.sql import dataframe
 from pyspark.sql.types import StructType, StructField, DoubleType
-from pyspark.sql.functions import col
 import sklearn.model_selection as ms
 from sklearn import metrics
+import time
 import sys
 import logging
 import uuid
@@ -28,15 +23,14 @@ import argparse
 SEED = 42
 
 
-class TerminateOnBaseline(Callback):
+class TerminateOnBaseline(tf.keras.callbacks.Callback):
     """ Callback that terminates training when monitored value reaches a specified baseline
         or has not improved for a while
     """
     def __init__(self, config):
-        """  Member function for inti
+        """  Member function for init
             arguments:
-                monitor: a string for what value to monitor
-                patience: the number of steps to wait before calling it a day
+                config: the configuration file
         """
         super(TerminateOnBaseline, self).__init__()
         self.monitor = config['monitor']
@@ -178,55 +172,63 @@ def timediff(x):
     return "{}:{}:{}".format(int(x/3600), str(int(x/60%60)).zfill(2), str(round(x - int(x/3600)*3600 - int(x/60%60)*60)).zfill(2))
 
 
-def block_skip_net(x, width):
+def block_skip_net(x, width, activation='relu', squeeze=False):
     """ the basic building block of a dnn with skip connections
         arguments:
             x: the input
             width: the width of the hidden layers
+            activation: the activation function: 'relu', 'elu', 'swish' (silu), 'leaky_relu', 'softplus'
+            squeeze: a boolean specifying wheher the skip units are squeezed
         returns:
             res: the skip net block
     """
-    # layer 1 with relu
-    y = tf.keras.layers.Dense(width, activation='relu')(x)
-    # layer 2 with relu
-    y = tf.keras.layers.Dense(width, activation='relu')(y)
+    # layer 1 with non-linearity
+    y = tf.keras.layers.Dense(width, activation=activation)(x)
+    # layer 2 with non-linearity
+    y = tf.keras.layers.Dense(width, activation=activation)(y)
 
     # layer 3 with short circuit
-    y = tf.keras.layers.Dense(width, activation='linear')(y)
+    if squeeze:
+        y = tf.keras.layers.Dense(x.shape[1], activation='linear')(y)
+    else:
+        y = tf.keras.layers.Dense(width, activation='linear')(y)
     if x.shape[1] != y.shape[1]:
         x_reshape = tf.keras.layers.Dense(width, activation='linear', use_bias=False, trainable = True)(x)
         res = tf.keras.layers.Add()([x_reshape,y])
     else:
         res = tf.keras.layers.Add()([x,y]) # check syntax
-    res = tf.keras.layers.ReLU()(res)
+
+    res = tf.keras.layers.Activation(activation)(res)
+     
     return res
 
 
 def nets(config):
     """ the tensorflow model builder
         arguments:
-            depth: the depth of the model (the number of blocks in the case of skip nets)
-            width: the width of the hidden layers
-            model_type: the type of model being built
+            config: the configuration file
         returns:
-            model: the tensorflow model
+            regressor: the tensorflow model
     """
     # define the tensorflow model
     if config["model_type"] == 'dnn':
         x = tf.keras.layers.Input(shape=(config["input_shape"],))
-        y = tf.keras.layers.Dense(config['width'], activation='relu')(x)
+        y = tf.keras.layers.Dense(config['width'], activation=config['activation'])(x)
         for i in range(1, config['depth']):
-            y = tf.keras.layers.Dense(config['width'], activation='relu')(y)
+            y = tf.keras.layers.Dense(config['width'], activation=config['activation'])(y)
         y = tf.keras.layers.Dense(1, activation='linear')(y)
         regressor = tf.keras.models.Model(x, y)
         
-    elif config["model_type"] == 'skip':
+    elif config["model_type"] in ['skip', 'squeeze']:
         x = tf.keras.layers.Input(shape=(config["input_shape"],))
-        y = block_skip_net(x, config['width'])
+        y = block_skip_net(x, config['width'], activation=config['activation'], squeeze=config["model_type"]=='squeeze')
         for i in range(1, config['depth']):
-            y = block_skip_net(y, config['width'])
+            y = block_skip_net(y, config['width'], activation=config['activation'], squeeze=config["model_type"]=='squeeze')
         y = tf.keras.layers.Dense(1, activation='linear')(y)
         regressor = tf.keras.models.Model(x, y)
+        
+    else:
+        logging.error(' '+config["model_type"]+' not implemented. model_type can be either dnn, skip or squeeze')
         
         
     # save parameter counts
@@ -341,7 +343,6 @@ def plot_loss(history, dir_name):
     """
     plt.plot(history.history['loss'], label='loss')
     plt.plot(history.history['val_loss'], label='val_loss')
-    # plt.ylim([0, 10])
     plt.xlabel('Epoch')
     plt.ylabel('y')
     plt.yscale('log')
@@ -382,7 +383,8 @@ def load_data(config):
         path = path + '/'
     header = ['x'+str(i+1) for i in range(config['input_shape'])] + ['yN', 'y_2'] 
     schema = StructType([StructField(header[i], DoubleType(), True) for i in range(config['input_shape']+2)])
-    df = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+str(config['input_shape'])+'D/train/*.csv.*', header='true')
+    folded = 'F' if config['folded'] else ''
+    df = spark.read.options(delimiter=',').schema(schema).format("csv").load(path+str(config['input_shape'])+'D'+folded+'/train/*.csv.*', header='true')
 
     logging.info(' data loaded into Spark session in {:.3f} seconds'.format(time.time() - start))
     
@@ -414,7 +416,7 @@ def post_process(regressor, x_test, y_test, history, config):
     # save the regressor
     logging.info(' saving the net')
     regressor.load_weights(config['directory']+'/checkpoint-'+config['model-uuid']+'-'+config['monitor']+'.hdf5')
-    regressor.save(config['directory']+'/dnn-'+str(config['depth'])+'-'+str(config['width'])+'-relu-'+str(config['batch_size'])+'-adam-'+config['lr_decay_type']+'-schedule-'+config['loss']+'-'+config['monitor']+f'-{abs_score:.6f}-{r2_score:.6f}.tfm.hdf5')
+    regressor.save(config['directory']+'/dnn-'+str(config['depth'])+'-'+str(config['width'])+'-'+config['activation']+'-'+str(config['batch_size'])+'-adam-'+config['lr_decay_type']+'-schedule-'+config['loss']+'-'+config['monitor']+f'-{abs_score:.6f}-{r2_score:.6f}.tfm.hdf5')
         
     #plot the training history
     logging.info(' printing training evaluation plots')
@@ -431,7 +433,7 @@ def post_process(regressor, x_test, y_test, history, config):
     os.remove(config['directory']+'/config-'+config['model-uuid']+'-prelim.json')
         
     # move directory
-    shutil.move(config['directory'], config['directory']+'-'+config['scaled']+'-'+str(config['depth'])+'-'+str(config['width'])+'-relu-'+str(config['batch_size'])+'-adam-'+config['lr_decay_type']+'-schedule-'+config['loss']+'-'+config['monitor']+f'-{abs_score:.6f}-{r2_score:.6f}')    
+    shutil.move(config['directory'], config['directory']+'-'+config['scaled']+'-'+str(config['depth'])+'-'+str(config['width'])+'-'+config['activation']+'-'+str(config['batch_size'])+'-adam-'+config['lr_decay_type']+'-schedule-'+config['loss']+'-'+config['monitor']+f'-{abs_score:.6f}-{r2_score:.6f}')    
     
     
 def main():
@@ -457,7 +459,12 @@ def main():
     else:
         m_uuid = config['model-uuid']
         
-    dir_name = config['base_directory']+config['model_type']+'-tf-'+str(config['input_shape'])+'D-'+str(config['var_y'])+'-'+m_uuid
+    folded = 'F' if config['folded'] else ''
+    if config['base_directory'] != '':
+        base_directory = config['base_directory'] +'/' if config['base_directory'][-1] != '/' else config['base_directory']
+        dir_name = base_directory+config['model_type']+'-tf-'+str(config['input_shape'])+'D'+folded+'-'+str(config['var_y'])+'-'+m_uuid
+    else:
+        dir_name = config['model_type']+'-tf-'+str(config['input_shape'])+'D'+folded+'-'+str(config['var_y'])+'-'+m_uuid
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
     config['directory'] = dir_name
