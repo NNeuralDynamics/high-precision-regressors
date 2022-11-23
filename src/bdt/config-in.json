@@ -1,16 +1,16 @@
 {
-    "input_shape": 8,
+    "input_shape": 2,
     "var_y": "yN",
     "sample-size": 10000000,
     "scaled": "normal",
     "test_size": 0.4,
     "max_depth": 20,
-    "data_path": "/home/apaul/Codes/high-precision-ml/data/",
+    "data_path": "/home/apaul/beegfs/high-precision-regressors/data/",
     "learning_rate": 0.01,
-    "n_jobs": 32,
+    "n_jobs": 40,
     "subsample": 1,
     "colsample_bytree": 1,
-    "n_estimators": 5000,
+    "n_estimators": 500000,
     "random_state": 42,
     "gamma": 0,
     "tree_method": "exact",
@@ -19,6 +19,6 @@
         "rmse",
         "logloss"
     ],
-    "base_directory": "",
+    "base_directory": "RUNS-sample-size-II/",
     "model-uuid": "UUID"
 }

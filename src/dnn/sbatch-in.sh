@@ -18,5 +18,5 @@ module load cuda/11.4
 
 # run the application:
 source .venv/bin/activate
-python3.10 dnn.py config.json
+python3.10 dnn.py config-UUID.json
 deactivate

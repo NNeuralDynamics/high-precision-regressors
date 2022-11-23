@@ -1,9 +1,9 @@
 {
-    "model_type": "skip",
+    "model_type": "dnn",
     "input_shape": 8,
     "var_y": "yN",
-    "depth": 9,
-    "width": 50,
+    "depth": 8,
+    "width": 100,
     "data_path": "/home/apaul/beegfs/high-precision-regressors/data/",
     "folded": false,
     "scaled": "normal",
@@ -23,8 +23,8 @@
         "mae"
     ],
     "verbose": 0,
-    "base_directory": "RUNS-sample-size-II/",
+    "base_directory": "dv-back/",
     "epochs": 10000,
-    "sample-size": 10000000,
+    "sample-size": 4000000,
     "model-uuid": "UUID"
 }
