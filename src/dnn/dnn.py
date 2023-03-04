@@ -210,6 +210,10 @@ def nets(config):
         returns:
             regressor: the tensorflow model
     """
+    # set to float64
+    tf.keras.backend.set_floatx('float64')
+    
+    
     # define the tensorflow model
     if config["model_type"] == 'dnn':
         x = tf.keras.layers.Input(shape=(config["input_shape"],))

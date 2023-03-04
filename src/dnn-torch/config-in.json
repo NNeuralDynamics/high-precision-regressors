@@ -7,12 +7,13 @@
     "data_path": "/home/apaul/beegfs/high-precision-regressors/data/",
     "folded": false,
     "scaled": "normal",
-    "activation": "leaky_relu",
+    "activation": "swish",
     "lr_decay_type": "exp",
     "initial_lr": 0.001,
     "final_lr": 1e-06,
     "decay_steps": 1000000,
     "validation_split": 0.4,
+    "test_split": 0.2,
     "batch_size": 512,
     "steps_per_epoch": 4000,
     "patience": 200,
@@ -24,7 +25,7 @@
     ],
     "verbose": 0,
     "base_directory": "",
-    "epochs": 10000,
+    "epochs": 100,
     "sample-size": 10000000,
     "model-uuid": "UUID"
 }
