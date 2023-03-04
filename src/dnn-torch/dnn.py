@@ -90,35 +90,35 @@ def normalize(df, config, var_y=None):
 
 class df_to_tensor(torch.utils.data.Dataset):
  
-  def __init__(self, df, config):
-    self.df = df.copy(deep = True)
-    
-    # define variables and target
-    var_x = ['x'+str(i+1) for i in range(config['input_shape'])]
-    var_y = config['var_y']
-    x = df[var_x].values
-    
-    if config['scaled'] == 'normal':
-        normalize(df, config)
-        y = df['y_scaled'].values
-    elif config['scaled'] == 'log':
-        df['y_log_scaled'] = np.log(df[var_y])
-        normalize(df, config, var_y='y_log_scaled')
-        y = df['y_scaled'].values
-    else:
-        y = df[var_y].values
-        config["mu"] = 0
-        config["sigma"] = 1
+    def __init__(self, df, config):
+        self.df = df.copy(deep = True)
 
+        # define variables and target
+        var_x = ['x'+str(i+1) for i in range(config['input_shape'])]
+        var_y = config['var_y']
+        x = df[var_x].values
+
+        if config['scaled'] == 'normal':
+            normalize(df, config)
+            y = df['y_scaled'].values
+        elif config['scaled'] == 'log':
+            df['y_log_scaled'] = np.log(df[var_y])
+            normalize(df, config, var_y='y_log_scaled')
+            y = df['y_scaled'].values
+        else:
+            y = df[var_y].values
+            config["mu"] = 0
+            config["sigma"] = 1
+
+
+        self.x = torch.tensor(x, dtype=torch.float64).to(get_device())
+        self.y = torch.tensor(y, dtype=torch.float64).reshape(-1, 1).to(get_device())
  
-    self.x = torch.tensor(x, dtype=torch.float64).to(config["device"])
-    self.y = torch.tensor(y, dtype=torch.float64).reshape(-1, 1).to(config["device"])
- 
-  def __len__(self):
-    return len(self.x)
+    def __len__(self):
+        return len(self.x)
    
-  def __getitem__(self,idx):
-    return self.x[idx],self.y[idx]
+    def __getitem__(self,idx):
+        return self.x[idx],self.y[idx]
 
 
 def build_data_loaders(df, config):
@@ -218,7 +218,7 @@ class skip_block(torch.nn.Module):
             x = self.reshape(x)
         y += x
         
-        return self.act(x)
+        return self.act(y)
     
     
 class skip_dnn(torch.nn.Module):
@@ -333,6 +333,8 @@ def train_one_epoch(model, train_data, f_optimizer, f_loss, max_steps):
 
 def validate_one_epoch(model, validate_data, f_loss, max_steps):
     epoch_loss = 0.
+    abs_score = 0.
+    r2_score = 0.
     
     for i, data in enumerate(validate_data):
         if i == max_steps:
@@ -340,13 +342,35 @@ def validate_one_epoch(model, validate_data, f_loss, max_steps):
         
         # forward prop
         x, y = data
-        y_out = model(x)
+        y_pred = model(x)
         
         # loss
-        loss = f_loss(y_out, y)
+        loss = f_loss(y_pred, y)
         epoch_loss += loss.item()
+        
+        # accuracy
+        abs_score += (1 - np.mean(np.abs( ((y_pred - y)/y).cpu().detach().numpy() )))*100
+        r2_score += metrics.r2_score(y.cpu().detach().numpy(), y_pred.cpu().detach().numpy())*100
 
-    return epoch_loss / (i + 1)
+    return epoch_loss / (i + 1), abs_score / (i + 1), r2_score / (i + 1)
+
+
+def test_model(model, test_data):
+    abs_score = 0.
+    r2_score= 0.
+    
+    for i, data in enumerate(test_data):
+        
+        # forward prop
+        x, y = data
+        y_pred = model(x)
+        
+        # accuracy
+        abs_score += (1 - np.mean(np.abs( ((y_pred - y)/y).cpu().detach().numpy() )))*100
+        r2_score += metrics.r2_score(y.cpu().detach().numpy(), y_pred.cpu().detach().numpy())*100
+
+
+    return abs_score / (i + 1), r2_score / (i + 1)
 
     
 def runML(df, config):
@@ -393,7 +417,7 @@ def runML(df, config):
         raise ValueError('lr type not defined. Has to be exp or poly or const')
         
     # the training history
-    history = {"epoch": [], "train_loss": [], "val_loss": [], "lr": []}
+    history = {"epoch": [], "train_loss": [], "val_loss": [], "lr": [], "abs_score": [], "r2_score": []}
     
     # model storage
     model_path = config['directory'] + f'/dnn-{config["depth"]}-{config["width"]}-{config["activation"]}-adam-{config["lr_decay_type"]}-schedule-{config["loss"]}-{config["monitor"]}.torch'
@@ -417,10 +441,12 @@ def runML(df, config):
 
         # We don't need gradients on to do reporting
         regressor.train(False)
-        avg_vloss = validate_one_epoch(regressor, validation_loader, loss_fn, config["steps_per_epoch"])
+        avg_vloss, abs_score, r2_score = validate_one_epoch(regressor, validation_loader, loss_fn, config["steps_per_epoch"])
         history["val_loss"].append(avg_vloss)
+        history["abs_score"].append(abs_score)
+        history["r2_score"].append(r2_score)
         
-        logging.info(f' Epoch {epoch + 1}: training loss = {avg_loss:.8f}  validation loss = {avg_vloss:.8f}  learning rate = {optimizer.param_groups[0]["lr"]:0.6e}')
+        logging.info(f' Epoch {epoch + 1}: training loss = {avg_loss:.8f}  validation loss = {avg_vloss:.8f}  learning rate = {optimizer.param_groups[0]["lr"]:0.6e}  relative accuracy: {abs_score:.6f}  R2 score: {r2_score:.6f}')
 
         if early_stopping.early_stop(regressor, avg_vloss):
             regressor.load_state_dict(torch.load(model_path))
@@ -434,24 +460,6 @@ def runML(df, config):
     config["fit_time"] = timediff(time.time() - start)
     
     return test_loader, regressor, history
-
-
-def test_model(model, test_data):
-    abs_score = 0
-    r2_score= 0
-    
-    for i, data in enumerate(test_data):
-        
-        # forward prop
-        x, y = data
-        y_pred = model(x)
-        
-        # accuracy
-        abs_score += (1 - np.mean(np.abs( ((y_pred - y)/y).cpu().detach().numpy() )))*100
-        r2_score += metrics.r2_score(y.cpu().detach().numpy(), y_pred.cpu().detach().numpy())*100
-
-
-    return abs_score / (i + 1), r2_score / (i + 1)
 
 
 #############################
@@ -509,6 +517,10 @@ def post_process(regressor, test_loader, history, config):
     # save config
     with open(config['directory']+'/config-'+config['model-uuid']+'.json', 'w') as f:
         json.dump(config, f, indent=4)
+        
+    # save history
+    with open(config['directory']+'/history-'+config['model-uuid']+'.json', 'w') as f:
+        json.dump(history, f, indent=4)
         
     # remove preliminary config file
     os.remove(config['directory']+'/config-'+config['model-uuid']+'-prelim.json')
