@@ -21,6 +21,7 @@ import argparse
 import pytorch_model_summary as pms
 
 SEED = 42
+CLIP = 1e2
 
 #############################
 # Data Stuff
@@ -173,6 +174,9 @@ class EarlyStopping:
         self.counter = 0
         self.min_validation_loss = np.inf
         self.m_path = m_path
+        
+    def reset_counter(self):
+        self.counter = 0
 
     def early_stop(self, model, validation_loss):
         if validation_loss < self.min_validation_loss:
@@ -215,8 +219,10 @@ class skip_block(torch.nn.Module):
             y = self.act(l(y))
         y = self.linear(y)
         if self.input_shape != self.width:
-            x = self.reshape(x)
-        y += x
+            residual = self.reshape(x)
+        else:
+            residual = x
+        y += residual
         
         return self.act(y)
     
@@ -323,6 +329,8 @@ def train_one_epoch(model, train_data, f_optimizer, f_loss, max_steps):
 
         # backprop
         loss = f_loss(y_out, y)
+        if loss.item() > CLIP:
+            return loss.item()
         loss.backward()
         f_optimizer.step()
 
@@ -385,7 +393,7 @@ def runML(df, config):
     regressor = nets(config)
 
     # print the summary
-    print(pms.summary(regressor, torch.tensor(torch.zeros((config["input_shape"],)).to(get_device())).double()))
+    logging.info('\n' + pms.summary(regressor, torch.tensor(torch.zeros((config["input_shape"],)).to(get_device())).double()))
     
     # define the loss function
     if config['loss'] == 'mse':
@@ -412,7 +420,11 @@ def runML(df, config):
                         power=0.5
                     )
     elif config['lr_decay_type'] == 'const':
-        lr_schedule = 0.001
+        scheduler = torch.optim.lr_scheduler.ConstantLR(
+                        optimizer=optimizer,
+                        factor=1., 
+                        total_iters=config["epochs"]
+                    )
     else:
         raise ValueError('lr type not defined. Has to be exp or poly or const')
         
@@ -428,15 +440,23 @@ def runML(df, config):
     
     # run the regressor
     start = time.time()
-    for epoch in range(config["epochs"]):
-
-        # add to history
-        history["epoch"].append(epoch + 1)
-        history["lr"].append(optimizer.param_groups[0]["lr"])
+    epoch = 0
+    while epoch < config["epochs"]:
 
         # Make sure gradient tracking is on, and do a pass over the data
         regressor.train(True)
         avg_loss = train_one_epoch(regressor, train_loader, optimizer, loss_fn, config["steps_per_epoch"])
+        
+        # for some activations there are spikes in the loss function: skip the epoch when that happens
+        if avg_loss > CLIP:
+            regressor.train(False)
+            early_stopping.reset_counter()
+            regressor.load_state_dict(torch.load(model_path))
+            continue
+            
+        # add to history
+        history["epoch"].append(epoch + 1)
+        history["lr"].append(optimizer.param_groups[0]["lr"])
         history["train_loss"].append(avg_loss)
 
         # We don't need gradients on to do reporting
@@ -447,15 +467,20 @@ def runML(df, config):
         history["r2_score"].append(r2_score)
         
         logging.info(f' Epoch {epoch + 1}: training loss = {avg_loss:.8f}  validation loss = {avg_vloss:.8f}  learning rate = {optimizer.param_groups[0]["lr"]:0.6e}  relative accuracy: {abs_score:.6f}  R2 score: {r2_score:.6f}')
-
+        
+        # check for early stopping
         if early_stopping.early_stop(regressor, avg_vloss):
             regressor.load_state_dict(torch.load(model_path))
             break
 
+        # if early stopping did not happen revert to the best model
         if epoch == config["epochs"] - 1:
             regressor.load_state_dict(torch.load(model_path))
             
+        # decay learning rate
         scheduler.step()
+        
+        epoch += 1
         
     config["fit_time"] = timediff(time.time() - start)
     
